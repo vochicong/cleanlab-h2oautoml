@@ -116,7 +116,7 @@ from h2o.sklearn import H2OAutoMLClassifier
 def getH2O(keep_cross_validation_predictions=True):
     return H2OAutoMLClassifier(
         keep_cross_validation_predictions=keep_cross_validation_predictions,
-        max_runtime_secs=30,
+        max_runtime_secs=10,
         sort_metric="aucpr",
         nfolds=3,
         verbosity="error",
@@ -182,39 +182,83 @@ X_test = X_test.to_numpy()
 # Let's now train and evaluate the original `H2OAutoML` model.
 #
 
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, roc_auc_score
 
-clf = getH2O()
-clf.fit(X_train, y_train)
-acc_og = clf.score(X_test, y_test)
-
-print(f"Test accuracy of original H2OAutoML: {acc_og}")
+og_h2o = getH2O()
+og_h2o.fit(X_train, y_train)
+preds = og_h2o.predict(X_test)
+acc_og_og = accuracy_score(y_test, preds)
+auc_og_og = roc_auc_score(y_test, preds)
+print(f"Test accuracy&auc of original H2OAutoML: {acc_og_og}, {auc_og_og}")
 
 # `cleanlab` provides a wrapper class that can be easily applied to any scikit-learn compatible model. Once wrapped, the resulting model can still be used in the exact same manner, but it will now train more robustly if the data have noisy labels.
 #
 
 from cleanlab.classification import CleanLearning
 
-clf = getH2O(keep_cross_validation_predictions=False)
-cl = CleanLearning(clf)  # cl has same methods/attributes as clf
+cl_h2o = CleanLearning(
+    getH2O(keep_cross_validation_predictions=False)
+)  # cl_h2o has same methods/attributes as og_h2o
 
 # The following operations take place when we train the `cleanlab`-wrapped model: The original model is trained in a cross-validated fashion to produce out-of-sample predicted probabilities. Then, these predicted probabilities are used to identify label issues, which are then removed from the dataset. Finally, the original model is trained on the remaining clean subset of the data once more.
 #
 
-cl.fit(X_train, y_train)
+cl_h2o.fit(X_train, y_train)
 
 # We can get predictions from the resulting model and evaluate them, just like how we did it for the original scikit-learn model.
 #
 
-preds = cl.predict(X_test)
-acc_cl = accuracy_score(y_test, preds)
-print(f"Test accuracy of cleanlab's H2OAutoML: {acc_cl}")
+preds = cl_h2o.predict(X_test)
+acc_cl_og = accuracy_score(y_test, preds)
+auc_cl_og = roc_auc_score(y_test, preds)
+print(f"Test accuracy&auc of cleanlab's H2OAutoML: {acc_cl_og}, {auc_cl_og}")
 
 # We can see that the test set accuracy slightly improved as a result of the data cleaning. Note that this will not always be the case, especially when we evaluate on test data that are themselves noisy. The best practice is to run `cleanlab` to identify potential label issues and then manually review them, before blindly trusting any accuracy metrics. In particular, the most effort should be made to ensure high-quality test data, which is supposed to reflect the expected performance of our model during deployment.
 #
 
+# Use cleanlab to find label issues in test data.
+#
+
+ranked_test_label_issues = find_label_issues(
+    labels=y_test,
+    pred_probs=cl_h2o.predict_proba(X_test),
+    return_indices_ranked_by="self_confidence",
+)
+
+ranked_test_label_issues.shape
+
+X_test_clean = np.delete(X_test, ranked_test_label_issues, axis=0)
+y_test_clean = np.delete(y_test, ranked_test_label_issues, axis=0)
+X_test.shape, X_test_clean.shape, y_test_clean.shape
+
+preds = og_h2o.predict(X_test_clean)
+acc_og_cl = accuracy_score(y_test_clean, preds)
+auc_og_cl = roc_auc_score(y_test_clean, preds)
+print(
+    f"Test accuracy&auc of cleanlab's H2OAutoML on cleaned test data : {acc_og_cl}, {auc_og_cl}"
+)
+
+preds = cl_h2o.predict(X_test_clean)
+acc_cl_cl = accuracy_score(y_test_clean, preds)
+auc_cl_cl = roc_auc_score(y_test_clean, preds)
+print(
+    f"Test accuracy&auc of cleanlab's H2OAutoML on cleaned test data : {acc_cl_cl}, {auc_cl_cl}"
+)
+
+# ## **6. Summary**
+#
+
+pd.DataFrame(
+    columns=["Train Data", "Test Data", "Test ACC", "Test AUC"],
+    data=[
+        ["Original", "Original", acc_og_og, auc_og_og],
+        ["Original", "Cleanlab", acc_og_cl, auc_og_cl],
+        ["Cleanlab", "Original", acc_cl_og, auc_cl_og],
+        ["Cleanlab", "Cleanlab", acc_cl_cl, auc_cl_cl],
+    ],
+)
+
 # + nbsphinx="hidden"
-# Hidden code cell to check that cleanlab has improved prediction accuracy
-print(f"Test accuracy of original vs cleanlab's H2OAutoML: {acc_og} vs {acc_cl}")
-if acc_og >= acc_cl:
+# Check that cleanlab has improved prediction accuracy
+if acc_og_og >= acc_cl_og:
     raise Exception("Cleanlab training failed to improve model accuracy.")
