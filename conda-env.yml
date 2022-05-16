@@ -1,9 +1,0 @@
-channels:
-  - conda-forge
-dependencies:
-  # - cleanlab::cleanlab
-  - h2oai::h2o
-  - pandas
-  - pip
-  - pip:
-    - git+https://github.com/cleanlab/cleanlab.git
