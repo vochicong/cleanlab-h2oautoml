@@ -8,3 +8,5 @@ dependencies:
   - pandas
   - ipykernel
   - jupytext
+  - isort
+  - black

@@ -38,12 +38,21 @@
 #
 
 # +
-import h2o
-
-h2o.init()
-# -
+import random
 
 import cleanlab
+import h2o
+import numpy as np
+import pandas as pd
+from cleanlab.classification import CleanLearning
+from h2o.sklearn import H2OAutoMLClassifier
+from sklearn.datasets import fetch_openml
+from sklearn.metrics import accuracy_score, roc_auc_score
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+# -
+
+h2o.init()
 
 # ## Install required dependencies
 #
@@ -55,15 +64,9 @@ import cleanlab
 # ```
 #
 
-# +
-import random
-import numpy as np
-
 SEED = 123456
-
 np.random.seed(SEED)
 random.seed(SEED)
-# -
 
 # ## Load and process the data
 #
@@ -71,21 +74,14 @@ random.seed(SEED)
 # We first load the data features and labels.
 #
 
-# +
-from sklearn.datasets import fetch_openml
-
 data = fetch_openml("credit-g")  # get the credit data from OpenML
 X_raw = data.data  # features (pandas DataFrame)
 y_raw = data.target  # labels (pandas Series)
-# -
 
 # Next we preprocess the data. Here we apply one-hot encoding to features with categorical data, and standardize features with numeric data. We also perform label encoding on the labels - "bad" is encoded as 0 and "good" is encoded as 1.
 #
 
 # +
-import pandas as pd
-from sklearn.preprocessing import StandardScaler
-
 cat_features = X_raw.select_dtypes("category").columns
 X_encoded = pd.get_dummies(X_raw, columns=cat_features, drop_first=True)
 
@@ -102,13 +98,9 @@ y = y.to_numpy()
 # Following proper ML practice, let's split our data into train and test sets.
 #
 
-# +
-from sklearn.model_selection import train_test_split
-
 X_train, X_test, y_train, y_test = train_test_split(
     X_encoded, y, test_size=0.25, random_state=SEED
 )
-# -
 
 # We again standardize the numeric features, this time fitting the scaling parameters solely on the training set.
 #
@@ -120,6 +112,8 @@ X_test[num_features] = scaler.transform(X_test[num_features])
 
 X_train = X_train.to_numpy()
 X_test = X_test.to_numpy()
+
+
 # -
 
 # ## Select a classification model and compute out-of-sample predicted probabilities
@@ -133,15 +127,10 @@ X_test = X_test.to_numpy()
 # K-fold cross-validation is a straightforward way to produce out-of-sample predicted probabilities for every datapoint in the dataset by training K copies of our model on different data subsets and using each copy to predict on the subset of data it did not see during training. An additional benefit of cross-validation is that it provides a more reliable evaluation of our model than a single training/validation split. We can obtain cross-validated out-of-sample predicted probabilities from any classifier via a simple scikit-learn wrapper:
 #
 
-from h2o.sklearn import H2OAutoMLClassifier
-
-
-def getH2O(keep_cross_validation_predictions=True):
+def getH2O():
     return H2OAutoMLClassifier(
-        # keep_cross_validation_predictions=keep_cross_validation_predictions,
-        max_runtime_secs=20,
-        sort_metric="aucpr",
-        # nfolds=3,
+        max_runtime_secs=10,
+        # sort_metric="aucpr",
         verbosity="error",
     )
 
@@ -149,20 +138,25 @@ def getH2O(keep_cross_validation_predictions=True):
 # `cleanlab` provides a wrapper class that can be easily applied to any scikit-learn compatible model. Once wrapped, the resulting model can still be used in the exact same manner, but it will now train more robustly if the data have noisy labels.
 #
 
-from cleanlab.classification import CleanLearning
-
 # Let's now train and evaluate the original `H2OAutoML` model.
 #
-
-from sklearn.metrics import accuracy_score, roc_auc_score
 
 og_h2o = getH2O()
 og_h2o.fit(X_train, y_train)
 
-preds = og_h2o.predict(X_test)
-acc_og_og = accuracy_score(y_test, preds)
-auc_og_og = roc_auc_score(y_test, preds)
+
+# +
+def eval_model(m, X, y):
+    preds = m.predict(X)
+    probas = m.predict_proba(X)[:, 1]
+    acc = accuracy_score(y, preds)
+    auc = roc_auc_score(y, probas)
+    return acc, auc
+
+
+acc_og_og, auc_og_og = eval_model(og_h2o, X_test, y_test)
 print(f"Test accuracy&auc of original H2OAutoML: {acc_og_og}, {auc_og_og}")
+# -
 
 # ## Train a more robust model from noisy labels
 #
@@ -170,9 +164,9 @@ print(f"Test accuracy&auc of original H2OAutoML: {acc_og_og}, {auc_og_og}")
 # The following operations take place when we train the `cleanlab`-wrapped model: The original model is trained in a cross-validated fashion to produce out-of-sample predicted probabilities. Then, these predicted probabilities are used to identify label issues, which are then removed from the dataset. Finally, the original model is trained on the remaining clean subset of the data once more.
 #
 
-cl_h2o = CleanLearning(
-    getH2O(keep_cross_validation_predictions=False)
-)  # cl_h2o has same methods/attributes as og_h2o
+# Use `frac_noise` to specify how much potentially erroneous noise should be automagically cleaned.
+
+cl_h2o = CleanLearning(getH2O(), find_label_issues_kwargs=dict(frac_noise=0.5))
 
 cl_h2o.fit(X_train, y_train)
 
@@ -192,6 +186,8 @@ tr_data_health = cleanlab.dataset.health_summary(
 
 label_issues = cl_h2o.get_label_issues()
 
+label_issues.is_label_issue.value_counts(normalize=True)
+
 label_issues[label_issues.is_label_issue]
 
 # These examples appear the most suspicious to our model and should be carefully re-examined. Perhaps the original annotators missed something when deciding on the labels for these individuals.
@@ -200,9 +196,7 @@ label_issues[label_issues.is_label_issue]
 # We can get predictions from the resulting model and evaluate them, just like how we did it for the original scikit-learn model.
 #
 
-preds = cl_h2o.predict(X_test)
-acc_cl_og = accuracy_score(y_test, preds)
-auc_cl_og = roc_auc_score(y_test, preds)
+acc_cl_og, auc_cl_og = eval_model(cl_h2o, X_test, y_test)
 print(f"Test accuracy&auc of cleanlab's H2OAutoML: {acc_cl_og}, {auc_cl_og}")
 
 # We can see that the test set accuracy slightly improved as a result of the data cleaning. Note that this will not always be the case, especially when we evaluate on test data that are themselves noisy. The best practice is to run `cleanlab` to identify potential label issues and then manually review them, before blindly trusting any accuracy metrics. In particular, the most effort should be made to ensure high-quality test data, which is supposed to reflect the expected performance of our model during deployment.
@@ -229,16 +223,12 @@ X_test_clean = np.delete(X_test, ranked_test_label_issues.is_label_issue, axis=0
 y_test_clean = np.delete(y_test, ranked_test_label_issues.is_label_issue, axis=0)
 X_test.shape, X_test_clean.shape, y_test_clean.shape
 
-preds = og_h2o.predict(X_test_clean)
-acc_og_cl = accuracy_score(y_test_clean, preds)
-auc_og_cl = roc_auc_score(y_test_clean, preds)
+acc_og_cl, auc_og_cl = eval_model(og_h2o, X_test_clean, y_test_clean)
 print(
     f"Test accuracy&auc of cleanlab's H2OAutoML on cleaned test data : {acc_og_cl}, {auc_og_cl}"
 )
 
-preds = cl_h2o.predict(X_test_clean)
-acc_cl_cl = accuracy_score(y_test_clean, preds)
-auc_cl_cl = roc_auc_score(y_test_clean, preds)
+acc_cl_cl, auc_cl_cl = eval_model(cl_h2o, X_test_clean, y_test_clean)
 print(
     f"Test accuracy&auc of cleanlab's H2OAutoML on cleaned test data : {acc_cl_cl}, {auc_cl_cl}"
 )
@@ -257,9 +247,9 @@ pd.DataFrame(
 )
 
 # + nbsphinx="hidden"
-# Check that cleanlab has improved prediction accuracy
-if acc_og_og >= acc_cl_og and auc_og_og >= auc_cl_og:
-    raise Exception(f"Cleanlab training failed to improve model performance.")
+# Check that cleanlab has improved prediction performance``
+assert acc_og_og < acc_cl_cl
+assert auc_og_og < auc_cl_cl
 
 # +
 # h2o.cluster().shutdown()
