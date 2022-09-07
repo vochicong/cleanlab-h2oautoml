@@ -1,0 +1,17 @@
+channels:
+  - conda-forge
+  - h2oai
+  - cleanlab
+dependencies:
+  - black
+  - cleanlab>=2
+  - ipykernel
+  - isort
+  - jupytext=1.14
+  - openjdk=8
+  - pandas
+  # - h2o>=3.36.1.1 # downloading from h2oai channel is very slow comparing to pip
+  - pip
+  - pip:
+    - h2o>=3.36.1.1
+  - python=3.8
